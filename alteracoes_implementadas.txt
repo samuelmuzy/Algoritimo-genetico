@@ -1,0 +1,75 @@
+ALTERAÇÕES IMPLEMENTADAS NO SISTEMA DE PROGRAMAÇÃO GENÉTICA
+=====================================================
+
+1. SISTEMA DE DETECÇÃO E CÁLCULO DE RECURSOS
+------------------------------------------
+- Implementação de mapa_recursos para armazenar informações detalhadas
+- Atualização periódica a cada 5 passos
+- Rastreamento dos 3 recursos mais próximos
+- Cálculo de distâncias considerando obstáculos
+- Sistema de evasão de recursos já coletados
+
+2. MELHORIAS NO SISTEMA DE FITNESS
+--------------------------------
+- Bônus maior por recursos coletados (3000 pontos)
+- Bônus por completar missão (10000 pontos)
+- Penalidades mais severas:
+  * Colisões (1000 pontos)
+  * Colisões consecutivas (500 pontos)
+  * Tempo parado (200 pontos)
+  * Movimento circular (10000 pontos)
+  * Não coletar recursos (5000 pontos)
+
+3. NAVEGAÇÃO INTELIGENTE
+----------------------
+- Detecção contínua de recursos
+- Cálculo preciso de distâncias e ângulos
+- Ajuste dinâmico de velocidade
+- Sistema de escape quando preso
+- Evasão eficiente de obstáculos
+
+4. PARÂMETROS DO ALGORITMO GENÉTICO
+--------------------------------
+- População aumentada para 200 indivíduos
+- Número de gerações aumentado para 40
+- Profundidade das árvores mantida em 4
+- Processamento paralelo utilizando todos os núcleos
+
+5. ARQUIVO SEPARADO PARA SIMULAÇÃO
+-------------------------------
+- Criado arquivo simular_melhor_robo.py
+- Função dedicada para simulação do melhor robô
+- Tratamento de erros ao carregar arquivo
+- Mensagens informativas durante simulação
+
+6. ESTRUTURA DO AMBIENTE
+----------------------
+- Meta só pode ser atingida após coleta de todos recursos
+- Sistema de verificação automática de coleta
+- Melhor controle de estado do ambiente
+- Reset adequado de todas as flags
+
+7. DETECÇÃO DE COMPORTAMENTOS INDESEJADOS
+---------------------------------------
+- Detecção de movimento circular
+- Verificação de progresso em direção aos recursos
+- Penalização de comportamentos repetitivos
+- Interrupção da simulação em casos críticos
+
+8. OTIMIZAÇÕES DE PERFORMANCE
+---------------------------
+- Cache de avaliação de árvores
+- Redução de tentativas de avaliação
+- Limitação de passos de simulação
+- Melhor gerenciamento de memória
+
+RESULTADOS ESPERADOS
+-------------------
+1. Movimento mais eficiente entre recursos
+2. Menos tempo preso em um mesmo recurso
+3. Melhor planejamento de rota
+4. Navegação mais suave e precisa
+5. Maior taxa de coleta de recursos
+6. Menor tempo total de missão
+7. Eliminação de comportamentos circulares
+8. Melhor gerenciamento de energia 

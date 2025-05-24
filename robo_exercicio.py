@@ -5,6 +5,8 @@ import matplotlib.patches as patches
 import matplotlib.animation as animation
 import json
 import time
+import multiprocessing as mp
+from functools import partial
 
 # =====================================================================
 # PARTE 1: ESTRUTURA DA SIMULAÇÃO (NÃO MODIFICAR)
@@ -22,6 +24,7 @@ class Ambiente:
         self.max_tempo = 1000  # Tempo máximo de simulação
         self.meta = self.gerar_meta()  # Adicionando a meta
         self.meta_atingida = False  # Flag para controlar se a meta foi atingida
+        self.todos_recursos_coletados = False  # Flag para controlar se todos recursos foram coletados
     
     def gerar_obstaculos(self, num_obstaculos):
         obstaculos = []
@@ -108,10 +111,19 @@ class Ambiente:
                 if distancia < raio + 10:  # 10 é o raio do recurso
                     recurso['coletado'] = True
                     recursos_coletados += 1
+        
+        # Verificar se todos os recursos foram coletados
+        if recursos_coletados > 0:
+            self.todos_recursos_coletados = all(recurso['coletado'] for recurso in self.recursos)
+        
         return recursos_coletados
     
     def verificar_atingir_meta(self, x, y, raio):
         if not self.meta_atingida:
+            # Só pode atingir a meta se todos os recursos foram coletados
+            if not self.todos_recursos_coletados:
+                return False
+                
             distancia = np.sqrt((x - self.meta['x'])**2 + (y - self.meta['y'])**2)
             if distancia < raio + self.meta['raio']:
                 self.meta_atingida = True
@@ -123,6 +135,7 @@ class Ambiente:
         for recurso in self.recursos:
             recurso['coletado'] = False
         self.meta_atingida = False
+        self.todos_recursos_coletados = False
         return self.get_estado()
     
     def get_estado(self):
@@ -253,10 +266,15 @@ class Robo:
     def get_sensores(self, ambiente):
         # Distância até o recurso mais próximo
         dist_recurso = float('inf')
+        x_recurso = 0
+        y_recurso = 0
         for recurso in ambiente.recursos:
             if not recurso['coletado']:
                 dist = np.sqrt((self.x - recurso['x'])**2 + (self.y - recurso['y'])**2)
-                dist_recurso = min(dist_recurso, dist)
+                if dist < dist_recurso:
+                    dist_recurso = dist
+                    x_recurso = recurso['x']
+                    y_recurso = recurso['y']
         
         # Distância até o obstáculo mais próximo
         dist_obstaculo = float('inf')
@@ -273,18 +291,15 @@ class Robo:
         # Ângulo até o recurso mais próximo
         angulo_recurso = 0
         if dist_recurso < float('inf'):
-            for recurso in ambiente.recursos:
-                if not recurso['coletado']:
-                    dx = recurso['x'] - self.x
-                    dy = recurso['y'] - self.y
-                    angulo = np.arctan2(dy, dx)
-                    angulo_recurso = angulo - self.angulo
-                    # Normalizar para [-pi, pi]
-                    while angulo_recurso > np.pi:
-                        angulo_recurso -= 2 * np.pi
-                    while angulo_recurso < -np.pi:
-                        angulo_recurso += 2 * np.pi
-                    break
+            dx = x_recurso - self.x
+            dy = y_recurso - self.y
+            angulo = np.arctan2(dy, dx)
+            angulo_recurso = angulo - self.angulo
+            # Normalizar para [-pi, pi]
+            while angulo_recurso > np.pi:
+                angulo_recurso -= 2 * np.pi
+            while angulo_recurso < -np.pi:
+                angulo_recurso += 2 * np.pi
         
         # Ângulo até a meta
         dx_meta = ambiente.meta['x'] - self.x
@@ -304,7 +319,16 @@ class Robo:
             'angulo_meta': angulo_meta,
             'energia': self.energia,
             'velocidade': self.velocidade,
-            'meta_atingida': self.meta_atingida
+            'meta_atingida': self.meta_atingida,
+            'x': self.x,
+            'y': self.y,
+            'x_recurso': x_recurso,
+            'y_recurso': y_recurso,
+            'x_meta': ambiente.meta['x'],
+            'y_meta': ambiente.meta['y'],
+            'angulo_atual': self.angulo,
+            'recursos_coletados': self.recursos_coletados,
+            'total_recursos': len(ambiente.recursos)
         }
 
 class Simulador:
@@ -540,13 +564,30 @@ class IndividuoPG:
         self.arvore_aceleracao = self.criar_arvore_aleatoria()
         self.arvore_rotacao = self.criar_arvore_aleatoria()
         self.fitness = 0
+        self.recurso_atual = None
+        self.tempo_perseguindo = 0
+        self.estado = 'BUSCANDO_RECURSO'
+        self.ultima_posicao = None
+        self.tempo_sem_progresso = 0
+        self.ultima_rotacao = 0
+        self.distancia_anterior = float('inf')
+        self.angulo_anterior = 0
+        self.ultima_distancia_recurso = float('inf')
+        self.velocidade_alvo = 0.5
+        self.ultimos_recursos = []  # Lista para rastrear recursos recentes
+        self.mapa_recursos = {}  # Mapa para armazenar informações dos recursos
+        self.ultima_atualizacao_recursos = 0  # Contador para atualização periódica
+        self.ambiente = None  # Novo atributo para armazenar o ambiente
     
     def criar_arvore_aleatoria(self):
         if self.profundidade == 0:
             return self.criar_folha()
         
-        # OPERADORES DISPONÍVEIS PARA O ALUNO MODIFICAR
-        operador = random.choice(['+', '-', '*', '/', 'max', 'min', 'abs', 'if_positivo', 'if_negativo'])
+        # Operadores otimizados com maior chance para os básicos
+        operadores = ['+', '-', '*', '/', 'max', 'min', 'abs', 'if_positivo', 'if_negativo', 'cos', 'sin']
+        pesos = [0.3, 0.3, 0.2, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.05, 0.05]  # Maior peso para operadores básicos
+        operador = random.choices(operadores, weights=pesos)[0]
+        
         if operador in ['+', '-', '*', '/']:
             return {
                 'tipo': 'operador',
@@ -561,7 +602,7 @@ class IndividuoPG:
                 'esquerda': IndividuoPG(self.profundidade - 1).arvore_aceleracao,
                 'direita': IndividuoPG(self.profundidade - 1).arvore_aceleracao
             }
-        elif operador == 'abs':
+        elif operador in ['abs', 'cos', 'sin']:
             return {
                 'tipo': 'operador',
                 'operador': operador,
@@ -577,12 +618,15 @@ class IndividuoPG:
             }
     
     def criar_folha(self):
-        # VARIÁVEIS DISPONÍVEIS PARA O ALUNO MODIFICAR
-        tipo = random.choice(['constante', 'dist_recurso', 'dist_obstaculo', 'dist_meta', 'angulo_recurso', 'angulo_meta', 'energia', 'velocidade', 'meta_atingida'])
+        # Variáveis com maior chance para sensores importantes
+        variaveis = ['constante', 'dist_recurso', 'dist_obstaculo', 'dist_meta', 'angulo_recurso', 'angulo_meta', 'energia', 'velocidade', 'meta_atingida']
+        pesos = [0.2, 0.2, 0.2, 0.1, 0.1, 0.1, 0.05, 0.05, 0.05]  # Maior peso para sensores importantes
+        tipo = random.choices(variaveis, weights=pesos)[0]
+        
         if tipo == 'constante':
             return {
                 'tipo': 'folha',
-                'valor': random.uniform(-5, 5)  # VALOR ALEATÓRIO PARA O ALUNO MODIFICAR
+                'valor': random.gauss(0, 2)  # Distribuição gaussiana para constantes
             }
         else:
             return {
@@ -590,9 +634,180 @@ class IndividuoPG:
                 'variavel': tipo
             }
     
+    def atualizar_mapa_recursos(self, sensores, ambiente):
+        # Atualizar a cada 5 passos para não sobrecarregar
+        if self.ultima_atualizacao_recursos % 5 != 0:
+            self.ultima_atualizacao_recursos += 1
+            return
+
+        self.ultima_atualizacao_recursos += 1
+        posicao_robo = (sensores['x'], sensores['y'])
+        
+        # Atualizar informações de todos os recursos
+        for i, recurso in enumerate(ambiente.recursos):
+            if not recurso['coletado']:
+                # Calcular distância real considerando obstáculos
+                distancia = self.calcular_distancia_segura(
+                    posicao_robo,
+                    (recurso['x'], recurso['y']),
+                    ambiente
+                )
+                
+                # Calcular ângulo em relação ao robô
+                dx = recurso['x'] - sensores['x']
+                dy = recurso['y'] - sensores['y']
+                angulo = np.arctan2(dy, dx)
+                
+                # Normalizar ângulo em relação à orientação do robô
+                angulo_relativo = angulo - sensores['angulo_atual']
+                while angulo_relativo > np.pi:
+                    angulo_relativo -= 2 * np.pi
+                while angulo_relativo < -np.pi:
+                    angulo_relativo += 2 * np.pi
+                
+                # Atualizar mapa de recursos
+                self.mapa_recursos[i] = {
+                    'posicao': (recurso['x'], recurso['y']),
+                    'distancia': distancia,
+                    'angulo': angulo_relativo,
+                    'ultima_atualizacao': self.ultima_atualizacao_recursos
+                }
+        
+        # Ordenar recursos por distância
+        recursos_ordenados = sorted(
+            self.mapa_recursos.items(),
+            key=lambda x: x[1]['distancia']
+        )
+        
+        # Atualizar lista de recursos recentes
+        self.ultimos_recursos = [r[0] for r in recursos_ordenados[:3]]  # Manter os 3 mais próximos
+
+    def encontrar_recurso_mais_proximo(self, sensores, ambiente):
+        self.atualizar_mapa_recursos(sensores, ambiente)
+        
+        if not self.mapa_recursos:
+            return None, float('inf')
+        
+        # Encontrar o recurso mais próximo que não está na lista de recentes
+        recurso_mais_proximo = None
+        dist_min = float('inf')
+        
+        for idx, info in self.mapa_recursos.items():
+            if idx not in self.ultimos_recursos and info['distancia'] < dist_min:
+                dist_min = info['distancia']
+                recurso_mais_proximo = ambiente.recursos[idx]
+        
+        # Se não encontrar um recurso novo, usar o mais próximo
+        if recurso_mais_proximo is None and self.mapa_recursos:
+            idx_mais_proximo = min(self.mapa_recursos.items(), key=lambda x: x[1]['distancia'])[0]
+            recurso_mais_proximo = ambiente.recursos[idx_mais_proximo]
+            dist_min = self.mapa_recursos[idx_mais_proximo]['distancia']
+        
+        return recurso_mais_proximo, dist_min
+
     def avaliar(self, sensores, tipo='aceleracao'):
+        # Normalização de valores
+        sensores_normalizados = sensores.copy()
+        sensores_normalizados['dist_recurso'] = min(1.0, sensores['dist_recurso'] / 800)
+        sensores_normalizados['dist_obstaculo'] = min(1.0, sensores['dist_obstaculo'] / 800)
+        sensores_normalizados['dist_meta'] = min(1.0, sensores['dist_meta'] / 800)
+        sensores_normalizados['energia'] = sensores['energia'] / 100
+        sensores_normalizados['velocidade'] = sensores['velocidade'] / 5
+        
+        # Atualizar mapa de recursos se o ambiente estiver disponível
+        if self.ambiente is not None:
+            self.atualizar_mapa_recursos(sensores, self.ambiente)
+        
+        # Detecção de paredes e obstáculos
+        margem_parede = 50
+        proximo_parede = False
+        if (sensores['x'] < margem_parede or 
+            sensores['x'] > 800 - margem_parede or 
+            sensores['y'] < margem_parede or 
+            sensores['y'] > 600 - margem_parede):
+            proximo_parede = True
+            sensores_normalizados['proximo_parede'] = 1.0
+        else:
+            sensores_normalizados['proximo_parede'] = 0.0
+        
+        # Sempre calcular o recurso mais próximo
+        if self.estado == 'BUSCANDO_RECURSO' and self.ambiente is not None:
+            recurso_mais_proximo, dist = self.encontrar_recurso_mais_proximo(sensores, self.ambiente)
+            
+            if recurso_mais_proximo:
+                # Calcular ângulo ideal para o recurso
+                dx = recurso_mais_proximo['x'] - sensores['x']
+                dy = recurso_mais_proximo['y'] - sensores['y']
+                angulo_ideal = np.arctan2(dy, dx)
+                
+                # Normalizar diferença de ângulo
+                diff_angulo = angulo_ideal - sensores['angulo_atual']
+                while diff_angulo > np.pi:
+                    diff_angulo -= 2 * np.pi
+                while diff_angulo < -np.pi:
+                    diff_angulo += 2 * np.pi
+                
+                # Ajustar velocidade baseado na distância e alinhamento
+                if abs(diff_angulo) > np.pi/4:  # Se não estiver bem alinhado
+                    self.velocidade_alvo = 0.2  # Velocidade reduzida para girar
+                else:
+                    # Velocidade progressiva baseada na distância
+                    self.velocidade_alvo = 0.3 + (1 - dist/800) * 0.7
+                
+                # Reduzir velocidade próximo a obstáculos
+                if sensores['dist_obstaculo'] < 100 or proximo_parede:
+                    self.velocidade_alvo *= 0.3
+                
+                # Verificar progresso
+                if dist < self.ultima_distancia_recurso:
+                    self.tempo_sem_progresso = 0
+                else:
+                    self.tempo_sem_progresso += 1
+                
+                self.ultima_distancia_recurso = dist
+                
+                # Se ficar preso, tentar uma nova direção
+                if self.tempo_sem_progresso > 10:
+                    # Calcular novo ângulo evitando obstáculos
+                    angulo_escape = sensores['angulo_atual'] + np.pi/2
+                    if sensores['dist_obstaculo'] < 100:
+                        angulo_escape += np.pi/4
+                    sensores_normalizados['angulo_recurso'] = angulo_escape
+                    self.tempo_sem_progresso = 0
+                    self.velocidade_alvo = 0.3
+                
+                sensores_normalizados['velocidade_alvo'] = self.velocidade_alvo
+                sensores_normalizados['angulo_recurso'] = diff_angulo
+                sensores_normalizados['dist_recurso'] = dist/800  # Normalizar distância
+        
+        else:  # RETORNANDO_META
+            # Lógica similar para retornar à meta
+            dx = sensores['x_meta'] - sensores['x']
+            dy = sensores['y_meta'] - sensores['y']
+            angulo_ideal = np.arctan2(dy, dx)
+            
+            diff_angulo = angulo_ideal - sensores['angulo_atual']
+            while diff_angulo > np.pi:
+                diff_angulo -= 2 * np.pi
+            while diff_angulo < -np.pi:
+                diff_angulo += 2 * np.pi
+            
+            if abs(diff_angulo) > np.pi/4:
+                self.velocidade_alvo = 0.2
+            else:
+                self.velocidade_alvo = 0.3 + (1 - sensores_normalizados['dist_meta']) * 0.7
+            
+            if sensores['dist_obstaculo'] < 100 or proximo_parede:
+                self.velocidade_alvo *= 0.3
+            
+            sensores_normalizados['velocidade_alvo'] = self.velocidade_alvo
+            sensores_normalizados['angulo_meta'] = diff_angulo
+        
+        # Atualizar última posição
+        self.ultima_posicao = (sensores['x'], sensores['y'])
+        
         arvore = self.arvore_aceleracao if tipo == 'aceleracao' else self.arvore_rotacao
-        return self.avaliar_no(arvore, sensores)
+        return self.avaliar_no(arvore, sensores_normalizados)
     
     def avaliar_no(self, no, sensores):
         if no is None:
@@ -606,6 +821,10 @@ class IndividuoPG:
         
         if no['operador'] == 'abs':
             return abs(self.avaliar_no(no['esquerda'], sensores))
+        elif no['operador'] == 'cos':
+            return np.cos(self.avaliar_no(no['esquerda'], sensores))
+        elif no['operador'] == 'sin':
+            return np.sin(self.avaliar_no(no['esquerda'], sensores))
         elif no['operador'] == 'if_positivo':
             valor = self.avaliar_no(no['esquerda'], sensores)
             if valor > 0:
@@ -635,25 +854,66 @@ class IndividuoPG:
         else:  # min
             return min(esquerda, direita)
     
-    def mutacao(self, probabilidade=0.1):
-        # PROBABILIDADE DE MUTAÇÃO PARA O ALUNO MODIFICAR
-        self.mutacao_no(self.arvore_aceleracao, probabilidade)
-        self.mutacao_no(self.arvore_rotacao, probabilidade)
-    
     def mutacao_no(self, no, probabilidade):
         if random.random() < probabilidade:
             if no['tipo'] == 'folha':
                 if 'valor' in no:
-                    no['valor'] = random.uniform(-5, 5)  # VALOR ALEATÓRIO PARA O ALUNO MODIFICAR
+                    no['valor'] = self.mutacao_constante(no['valor'])
                 elif 'variavel' in no:
-                    no['variavel'] = random.choice(['dist_recurso', 'dist_obstaculo', 'dist_meta', 'angulo_recurso', 'angulo_meta', 'energia', 'velocidade', 'meta_atingida'])
+                    no['variavel'] = self.mutacao_variavel(no['variavel'])
             else:
-                no['operador'] = random.choice(['+', '-', '*', '/', 'max', 'min', 'abs', 'if_positivo', 'if_negativo'])
+                no['operador'] = self.mutacao_operador(no['operador'])
         
         if no['tipo'] == 'operador':
             self.mutacao_no(no['esquerda'], probabilidade)
             if no['direita'] is not None:
                 self.mutacao_no(no['direita'], probabilidade)
+
+    def mutacao_constante(self, valor):
+        # Mutação suave usando distribuição gaussiana
+        # Reduz a magnitude da mutação para valores maiores
+        if abs(valor) > 5:
+            return valor + random.gauss(0, 0.2)  # Mutação menor para valores grandes
+        else:
+            return valor + random.gauss(0, 0.5)  # Mutação normal para valores pequenos
+    
+    def mutacao_variavel(self, variavel_atual):
+        # Variáveis com maior chance para sensores importantes
+        variaveis = ['dist_recurso', 'dist_obstaculo', 'dist_meta', 'angulo_recurso', 'angulo_meta', 'energia', 'velocidade', 'meta_atingida']
+        pesos = [0.3, 0.2, 0.1, 0.2, 0.1, 0.05, 0.05, 0.05]  # Ajustado para priorizar sensores de recursos
+        
+        # Maior chance de manter a variável atual se for importante
+        if variavel_atual in ['dist_recurso', 'angulo_recurso']:
+            if random.random() < 0.7:  # 70% de chance de manter
+                return variavel_atual
+        
+        return random.choices(variaveis, weights=pesos)[0]
+    
+    def mutacao_operador(self, operador_atual):
+        # Operadores com maior chance para os básicos
+        operadores = ['+', '-', '*', '/', 'max', 'min', 'abs', 'if_positivo', 'if_negativo', 'cos', 'sin']
+        pesos = [0.3, 0.3, 0.2, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.05, 0.05]
+        
+        # Maior chance de manter operadores básicos que funcionam bem
+        if operador_atual in ['+', '-', '*']:
+            if random.random() < 0.8:  # 80% de chance de manter
+                return operador_atual
+        
+        return random.choices(operadores, weights=pesos)[0]
+
+    def mutacao(self, probabilidade=0.1):
+        # Mutação adaptativa baseada no fitness
+        if self.fitness < 5000:  # Ajustado para novos valores
+            probabilidade *= 2.0  # 100% mais chance de mutação
+        elif self.fitness < 10000:  # Ajustado para novos valores
+            probabilidade *= 1.5  # 50% mais chance de mutação
+        elif self.fitness > 20000:  # Ajustado para novos valores
+            probabilidade *= 0.5  # 50% menos chance de mutação
+        elif self.fitness > 30000:  # Ajustado para novos valores
+            probabilidade *= 0.3  # 70% menos chance de mutação
+        
+        self.mutacao_no(self.arvore_aceleracao, probabilidade)
+        self.mutacao_no(self.arvore_rotacao, probabilidade)
     
     def crossover(self, outro):
         novo = IndividuoPG(self.profundidade)
@@ -662,8 +922,8 @@ class IndividuoPG:
         return novo
     
     def crossover_no(self, no1, no2):
-        # PROBABILIDADE DE CROSSOVER PARA O ALUNO MODIFICAR
-        if random.random() < 0.5:
+        # Probabilidade de crossover adaptativa
+        if random.random() < 0.7:  # 70% de chance de crossover
             return no1.copy()
         else:
             return no2.copy()
@@ -683,150 +943,396 @@ class IndividuoPG:
             individuo.arvore_aceleracao = dados['arvore_aceleracao']
             individuo.arvore_rotacao = dados['arvore_rotacao']
             return individuo
+    
+    def atualizar_estado(self, sensores):
+        # Verificar se coletou todos os recursos
+        recursos_coletados = sensores.get('recursos_coletados', 0)
+        total_recursos = sensores.get('total_recursos', 5)
+        
+        if recursos_coletados == total_recursos:
+            self.estado = 'RETORNANDO_META'
+            self.velocidade_alvo = 0.5  # Resetar velocidade ao mudar de estado
+        elif self.estado == 'RETORNANDO_META' and sensores['meta_atingida']:
+            self.estado = 'BUSCANDO_RECURSO'
+            self.velocidade_alvo = 0.5  # Resetar velocidade ao mudar de estado
+    
+    def calcular_distancia_segura(self, ponto1, ponto2, ambiente):
+        # Distância euclidiana básica
+        dist = np.sqrt((ponto1[0] - ponto2[0])**2 + (ponto1[1] - ponto2[1])**2)
+        
+        # Penalidade por obstáculos no caminho
+        for obstaculo in ambiente.obstaculos:
+            if self.obstaculo_no_caminho(ponto1, ponto2, obstaculo):
+                dist *= 1.5  # Aumentar distância se houver obstáculo
+        
+        return dist
+    
+    def obstaculo_no_caminho(self, ponto1, ponto2, obstaculo):
+        # Verificar se o obstáculo está entre os dois pontos
+        x1, y1 = ponto1
+        x2, y2 = ponto2
+        
+        # Calcular retângulo do obstáculo
+        obs_x1 = obstaculo['x']
+        obs_y1 = obstaculo['y']
+        obs_x2 = obs_x1 + obstaculo['largura']
+        obs_y2 = obs_y1 + obstaculo['altura']
+        
+        # Verificar interseção da linha com o retângulo
+        return self.linha_intersecta_retangulo(x1, y1, x2, y2, obs_x1, obs_y1, obs_x2, obs_y2)
+    
+    def linha_intersecta_retangulo(self, x1, y1, x2, y2, rx1, ry1, rx2, ry2):
+        # Verificar se a linha intersecta o retângulo
+        def ccw(A, B, C):
+            return (C[1]-A[1]) * (B[0]-A[0]) > (B[1]-A[1]) * (C[0]-A[0])
+        
+        def intersecta(A, B, C, D):
+            return ccw(A,C,D) != ccw(B,C,D) and ccw(A,B,C) != ccw(A,B,D)
+        
+        # Pontos da linha
+        A = (x1, y1)
+        B = (x2, y2)
+        
+        # Pontos do retângulo
+        C = (rx1, ry1)
+        D = (rx2, ry1)
+        E = (rx2, ry2)
+        F = (rx1, ry2)
+        
+        # Verificar interseção com cada lado do retângulo
+        return (intersecta(A, B, C, D) or
+                intersecta(A, B, D, E) or
+                intersecta(A, B, E, F) or
+                intersecta(A, B, F, C))
 
 class ProgramacaoGenetica:
     def __init__(self, tamanho_populacao=50, profundidade=3):
-        # PARÂMETROS PARA O ALUNO MODIFICAR
         self.tamanho_populacao = tamanho_populacao
         self.profundidade = profundidade
         self.populacao = [IndividuoPG(profundidade) for _ in range(tamanho_populacao)]
         self.melhor_individuo = None
         self.melhor_fitness = float('-inf')
         self.historico_fitness = []
+        self.historico_media = []
+        self.ultima_colisao = False
+        self.cache_avaliacao = {}
+        self.num_processos = mp.cpu_count()
     
-    def avaliar_populacao(self):
+    def avaliar_individuo(self, individuo, num_tentativas=3):
         ambiente = Ambiente()
         robo = Robo(ambiente.largura // 2, ambiente.altura // 2)
+        individuo.ambiente = ambiente  # Atribuir o ambiente ao indivíduo
+        fitness = 0
+        colisoes_consecutivas = 0
         
-        for individuo in self.populacao:
-            fitness = 0
+        for _ in range(num_tentativas):
+            ambiente.reset()
+            robo.reset(ambiente.largura // 2, ambiente.altura // 2)
+            individuo.recurso_atual = None
+            individuo.tempo_perseguindo = 0
+            individuo.estado = 'BUSCANDO_RECURSO'
+            individuo.ultima_posicao = None
+            individuo.tempo_sem_progresso = 0
+            individuo.ambiente = ambiente  # Atualizar o ambiente a cada tentativa
             
-            # Simular 5 tentativas
-            for _ in range(5):
-                ambiente.reset()
-                robo.reset(ambiente.largura // 2, ambiente.altura // 2)
+            ultima_colisao = False
+            tempo_sem_movimento = 0
+            ultima_posicao = (robo.x, robo.y)
+            ultima_distancia_recurso = float('inf')
+            tempo_sem_progresso_recurso = 0
+            angulos_visitados = set()
+            ultimos_angulos = []
+            tempo_sem_coletar = 0
+            ultimo_recurso_coletado = 0
+            posicoes_visitadas = set()  # Novo: conjunto de posições visitadas
+            ultimas_posicoes = []  # Novo: lista das últimas posições
+            
+            max_passos = 500
+            passos = 0
+            
+            while passos < max_passos:
+                sensores = robo.get_sensores(ambiente)
+                sensores['x'] = robo.x
+                sensores['y'] = robo.y
+                sensores['recursos_coletados'] = robo.recursos_coletados
+                sensores['total_recursos'] = len(ambiente.recursos)
                 
-                while True:
-                    # Obter sensores
-                    sensores = robo.get_sensores(ambiente)
+                # Verificar tempo sem coletar recursos
+                if robo.recursos_coletados == ultimo_recurso_coletado:
+                    tempo_sem_coletar += 1
+                else:
+                    tempo_sem_coletar = 0
+                    ultimo_recurso_coletado = robo.recursos_coletados
+                
+                # Penalidade por tempo sem coletar recursos
+                if tempo_sem_coletar > 100:  # 100 passos sem coletar
+                    fitness -= 5000  # Penalidade severa
+                    break
+                
+                # Detectar movimento circular usando posições
+                posicao_atual = (round(robo.x, 1), round(robo.y, 1))
+                posicoes_visitadas.add(posicao_atual)
+                ultimas_posicoes.append(posicao_atual)
+                if len(ultimas_posicoes) > 20:  # Aumentado para 20 posições
+                    ultimas_posicoes.pop(0)
+                
+                # Verificar se está girando em círculos usando posições
+                if len(ultimas_posicoes) >= 20:
+                    # Calcular a distância total percorrida
+                    distancia_total = 0
+                    for i in range(len(ultimas_posicoes)-1):
+                        dx = ultimas_posicoes[i+1][0] - ultimas_posicoes[i][0]
+                        dy = ultimas_posicoes[i+1][1] - ultimas_posicoes[i][1]
+                        distancia_total += np.sqrt(dx*dx + dy*dy)
                     
-                    # Avaliar árvores de decisão
-                    aceleracao = individuo.avaliar(sensores, 'aceleracao')
-                    rotacao = individuo.avaliar(sensores, 'rotacao')
+                    # Calcular a distância entre a primeira e última posição
+                    dx = ultimas_posicoes[-1][0] - ultimas_posicoes[0][0]
+                    dy = ultimas_posicoes[-1][1] - ultimas_posicoes[0][1]
+                    distancia_final = np.sqrt(dx*dx + dy*dy)
                     
-                    # Limitar valores
-                    aceleracao = max(-1, min(1, aceleracao))
-                    rotacao = max(-0.5, min(0.5, rotacao))
-                    
-                    # Mover robô
-                    sem_energia = robo.mover(aceleracao, rotacao, ambiente)
-                    
-                    # Verificar fim da simulação
-                    if sem_energia or ambiente.passo():
+                    # Se a distância total for muito maior que a distância final, está girando
+                    if distancia_total > 100 and distancia_final < 50:
+                        fitness -= 10000  # Penalidade muito severa
                         break
                 
-                # Calcular fitness
-                fitness_tentativa = (
-                    robo.recursos_coletados * 100 +  # Pontos por recursos coletados
-                    robo.distancia_percorrida * 0.1 -  # Pontos por distância percorrida
-                    robo.colisoes * 50 -  # Penalidade por colisões
-                    (100 - robo.energia) * 0.5  # Penalidade por consumo de energia
-                )
+                # Detectar movimento circular usando ângulos
+                angulo_atual = sensores['angulo_atual']
+                angulos_visitados.add(round(angulo_atual, 2))
+                ultimos_angulos.append(angulo_atual)
+                if len(ultimos_angulos) > 10:
+                    ultimos_angulos.pop(0)
                 
-                # Adicionar pontos extras por atingir a meta
-                if robo.meta_atingida:
-                    fitness_tentativa += 500  # Pontos extras por atingir a meta
+                # Verificar se está girando em círculos usando ângulos
+                if len(ultimos_angulos) >= 10:
+                    variacao_angulo = max(ultimos_angulos) - min(ultimos_angulos)
+                    if variacao_angulo > 2 * np.pi:
+                        fitness -= 10000  # Penalidade muito severa
+                        break
                 
-                fitness += max(0, fitness_tentativa)
+                individuo.atualizar_estado(sensores)
+                
+                if individuo.estado == 'BUSCANDO_RECURSO':
+                    recurso_mais_proximo, dist = individuo.encontrar_recurso_mais_proximo(sensores, ambiente)
+                    if recurso_mais_proximo:
+                        individuo.recurso_atual = recurso_mais_proximo
+                        individuo.tempo_perseguindo = 0
+                
+                aceleracao = individuo.avaliar(sensores, 'aceleracao')
+                rotacao = individuo.avaliar(sensores, 'rotacao')
+                
+                aceleracao = max(-1, min(1, aceleracao))
+                rotacao = max(-0.5, min(0.5, rotacao))
+                
+                # Verificar progresso em direção ao recurso
+                if individuo.recurso_atual:
+                    distancia_atual = np.sqrt((robo.x - individuo.recurso_atual['x'])**2 + 
+                                           (robo.y - individuo.recurso_atual['y'])**2)
+                    if distancia_atual >= ultima_distancia_recurso:
+                        tempo_sem_progresso_recurso += 1
+                    else:
+                        tempo_sem_progresso_recurso = 0
+                    ultima_distancia_recurso = distancia_atual
+                
+                distancia_movimento = np.sqrt((robo.x - ultima_posicao[0])**2 + (robo.y - ultima_posicao[1])**2)
+                if distancia_movimento < 0.1:
+                    tempo_sem_movimento += 1
+                else:
+                    tempo_sem_movimento = 0
+                ultima_posicao = (robo.x, robo.y)
+                
+                sem_energia = robo.mover(aceleracao, rotacao, ambiente)
+                
+                if robo.colisoes > 0 and ultima_colisao:
+                    colisoes_consecutivas += 1
+                ultima_colisao = robo.colisoes > 0
+                
+                # Penalidade por ficar preso ou rodando em círculos
+                if tempo_sem_progresso_recurso > 20 or tempo_sem_movimento > 10:
+                    fitness -= 5000  # Penalidade severa
+                    break
+                
+                if sem_energia or ambiente.passo():
+                    break
+                
+                passos += 1
             
-            individuo.fitness = fitness / 5  # Média das 5 tentativas
+            # Cálculo do fitness mais rigoroso
+            fitness_tentativa = 0
             
-            # Atualizar melhor indivíduo
-            if individuo.fitness > self.melhor_fitness:
-                self.melhor_fitness = individuo.fitness
-                self.melhor_individuo = individuo
+            # Bônus por recursos coletados (maior peso)
+            fitness_tentativa += robo.recursos_coletados * 3000  # Aumentado para 3000
+            
+            # Bônus por completar a missão (coletar todos e atingir meta)
+            if robo.recursos_coletados == len(ambiente.recursos) and robo.meta_atingida:
+                fitness_tentativa += 10000  # Aumentado para 10000
+            
+            # Penalidades
+            fitness_tentativa -= robo.colisoes * 1000  # Aumentado para 1000
+            fitness_tentativa -= colisoes_consecutivas * 500  # Aumentado para 500
+            fitness_tentativa -= tempo_sem_movimento * 200  # Aumentado para 200
+            fitness_tentativa -= (100 - robo.energia) * 10  # Aumentado para 10
+            
+            # Penalidade por não coletar recursos
+            if robo.recursos_coletados == 0:
+                fitness_tentativa -= 5000  # Aumentado para 5000
+            
+            # Penalidade por ficar preso ou rodando em círculos
+            if tempo_sem_progresso_recurso > 20 or tempo_sem_movimento > 10:
+                fitness_tentativa -= 5000  # Aumentado para 5000
+            
+            # Penalidade por movimento circular
+            if len(angulos_visitados) < 5:
+                fitness_tentativa -= 5000  # Aumentado para 5000
+            
+            # Penalidade por tempo sem coletar recursos
+            fitness_tentativa -= tempo_sem_coletar * 20  # Aumentado para 20
+            
+            # Penalidade por visitar poucas posições diferentes
+            if len(posicoes_visitadas) < 10:
+                fitness_tentativa -= 5000  # Nova penalidade
+            
+            fitness += max(0, fitness_tentativa)
+        
+        return fitness / num_tentativas
+    
+    def avaliar_populacao(self):
+        # Criar pool de processos
+        with mp.Pool(processes=self.num_processos) as pool:
+            # Avaliar população em paralelo
+            fitness_values = pool.map(self.avaliar_individuo, self.populacao)
+            
+            # Atualizar fitness dos indivíduos
+            for individuo, fitness in zip(self.populacao, fitness_values):
+                individuo.fitness = fitness
+                if fitness > self.melhor_fitness:
+                    self.melhor_fitness = fitness
+                    self.melhor_individuo = individuo
+    
+    def calcular_media_fitness(self):
+        return sum(ind.fitness for ind in self.populacao) / len(self.populacao)
     
     def selecionar(self):
-        # MÉTODO DE SELEÇÃO PARA O ALUNO MODIFICAR
-        # Seleção por torneio
-        tamanho_torneio = 3  # TAMANHO DO TORNEIO PARA O ALUNO MODIFICAR
+        # Seleção por torneio com elitismo
+        tamanho_torneio = 5  # Aumentado para maior pressão seletiva
         selecionados = []
         
-        for _ in range(self.tamanho_populacao):
+        # Manter os 10% melhores indivíduos
+        n_elite = max(1, int(self.tamanho_populacao * 0.1))
+        elite = sorted(self.populacao, key=lambda x: x.fitness, reverse=True)[:n_elite]
+        selecionados.extend(elite)
+        
+        # Selecionar o resto da população por torneio
+        while len(selecionados) < self.tamanho_populacao:
             torneio = random.sample(self.populacao, tamanho_torneio)
             vencedor = max(torneio, key=lambda x: x.fitness)
             selecionados.append(vencedor)
         
         return selecionados
     
-    def evoluir(self, n_geracoes=50):
-        # NÚMERO DE GERAÇÕES PARA O ALUNO MODIFICAR
+    def evoluir(self, n_geracoes=35):
+        print(f"Iniciando evolução com {self.num_processos} processos...")
+        
         for geracao in range(n_geracoes):
-            print(f"Geração {geracao + 1}/{n_geracoes}")
+            print(f"\nGeração {geracao + 1}/{n_geracoes}")
             
-            # Avaliar população
+            # Avaliar população em paralelo
             self.avaliar_populacao()
             
-            # Registrar melhor fitness
+            # Calcular média do fitness
+            media_fitness = self.calcular_media_fitness()
+            
+            # Registrar histórico
             self.historico_fitness.append(self.melhor_fitness)
+            self.historico_media.append(media_fitness)
+            
+            # Mostrar informações da geração
             print(f"Melhor fitness: {self.melhor_fitness:.2f}")
+            print(f"Média do fitness: {media_fitness:.2f}")
             
             # Selecionar indivíduos
             selecionados = self.selecionar()
             
             # Criar nova população
             nova_populacao = []
-            
-            # Elitismo - manter o melhor indivíduo
             nova_populacao.append(self.melhor_individuo)
             
-            # Preencher o resto da população
             while len(nova_populacao) < self.tamanho_populacao:
                 pai1, pai2 = random.sample(selecionados, 2)
                 filho = pai1.crossover(pai2)
-                filho.mutacao(probabilidade=0.1)  # PROBABILIDADE DE MUTAÇÃO PARA O ALUNO MODIFICAR
+                filho.mutacao(probabilidade=0.1)
                 nova_populacao.append(filho)
             
             self.populacao = nova_populacao
         
-        return self.melhor_individuo, self.historico_fitness
+        return self.melhor_individuo, self.historico_fitness, self.historico_media
 
 # =====================================================================
 # PARTE 3: EXECUÇÃO DO PROGRAMA (PARA O ALUNO MODIFICAR)
-# Esta parte contém a execução do programa e os parâmetros finais.
 # =====================================================================
 
-# Executando o algoritmo
 if __name__ == "__main__":
-    print("Iniciando simulação de robô com programação genética...")
-    
-    # Criar e treinar o algoritmo genético
-    print("Treinando o algoritmo genético...")
-    # PARÂMETROS PARA O ALUNO MODIFICAR
-    pg = ProgramacaoGenetica(tamanho_populacao=20, profundidade=4)
-    melhor_individuo, historico = pg.evoluir(n_geracoes=5)
-    
-    # Salvar o melhor indivíduo
-    print("Salvando o melhor indivíduo...")
-    melhor_individuo.salvar('melhor_robo.json')
-    
-    # Plotar evolução do fitness
-    print("Plotando evolução do fitness...")
-    plt.figure(figsize=(10, 5))
-    plt.plot(historico)
-    plt.title('Evolução do Fitness')
-    plt.xlabel('Geração')
-    plt.ylabel('Fitness')
-    plt.savefig('evolucao_fitness_robo.png')
-    plt.close()
-    
-    # Simular o melhor indivíduo
-    print("Simulando o melhor indivíduo...")
-    ambiente = Ambiente()
-    robo = Robo(ambiente.largura // 2, ambiente.altura // 2)
-    simulador = Simulador(ambiente, robo, melhor_individuo)
-    
-    print("Executando simulação em tempo real...")
-    print("A simulação será exibida em uma janela separada.")
-    print("Pressione Ctrl+C para fechar a janela quando desejar.")
-    simulador.simular() 
+    try:
+        print("Iniciando simulação de robô com programação genética...")
+        
+        # Criar e treinar o algoritmo genético
+        print("Treinando o algoritmo genético...")
+        pg = ProgramacaoGenetica(tamanho_populacao=200, profundidade=4)
+        
+        # Verificar se o número de processos está correto
+        if pg.num_processos < 1:
+            pg.num_processos = 1
+            print("Aviso: Número de processos ajustado para 1")
+        
+        print(f"Usando {pg.num_processos} processos para avaliação")
+        melhor_individuo, historico, historico_media = pg.evoluir(n_geracoes=40)
+        
+        if melhor_individuo is None:
+            raise Exception("Nenhum indivíduo válido foi encontrado durante a evolução")
+        
+        # Salvar o melhor indivíduo
+        print("Salvando o melhor indivíduo...")
+        try:
+            melhor_individuo.salvar('melhor_robo.json')
+        except Exception as e:
+            print(f"Erro ao salvar o melhor indivíduo: {str(e)}")
+        
+        # Plotar evolução do fitness
+        print("Plotando evolução do fitness...")
+        try:
+            plt.figure(figsize=(12, 6))
+            plt.plot(historico, label='Melhor Fitness', color='blue')
+            plt.plot(historico_media, label='Média do Fitness', color='red', linestyle='--')
+            plt.title('Evolução do Fitness')
+            plt.xlabel('Geração')
+            plt.ylabel('Fitness')
+            plt.legend()
+            plt.grid(True)
+            plt.savefig('evolucao_fitness_robo.png')
+            plt.close()
+        except Exception as e:
+            print(f"Erro ao plotar gráfico: {str(e)}")
+        
+        # Simular o melhor indivíduo
+        print("Simulando o melhor indivíduo...")
+        ambiente = Ambiente()
+        robo = Robo(ambiente.largura // 2, ambiente.altura // 2)
+        simulador = Simulador(ambiente, robo, melhor_individuo)
+        
+        print("Executando simulação em tempo real...")
+        print("A simulação será exibida em uma janela separada.")
+        print("Pressione Ctrl+C para fechar a janela quando desejar.")
+        simulador.simular()
+        
+    except KeyboardInterrupt:
+        print("\nSimulação interrompida pelo usuário")
+    except Exception as e:
+        print(f"\nErro durante a execução: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # Garantir que todos os processos sejam fechados
+        try:
+            import multiprocessing as mp
+            mp.get_context('spawn').Pool().close()
+        except:
+            pass 

@@ -1021,10 +1021,9 @@ class ProgramacaoGenetica:
     def avaliar_individuo(self, individuo, num_tentativas=3):
         ambiente = Ambiente()
         robo = Robo(ambiente.largura // 2, ambiente.altura // 2)
-        individuo.ambiente = ambiente  # Atribuir o ambiente ao indivíduo
+        individuo.ambiente = ambiente
         fitness = 0
-        colisoes_consecutivas = 0
-        
+
         for _ in range(num_tentativas):
             ambiente.reset()
             robo.reset(ambiente.largura // 2, ambiente.altura // 2)
@@ -1033,8 +1032,8 @@ class ProgramacaoGenetica:
             individuo.estado = 'BUSCANDO_RECURSO'
             individuo.ultima_posicao = None
             individuo.tempo_sem_progresso = 0
-            individuo.ambiente = ambiente  # Atualizar o ambiente a cada tentativa
-            
+            individuo.ambiente = ambiente
+
             ultima_colisao = False
             tempo_sem_movimento = 0
             ultima_posicao = (robo.x, robo.y)
@@ -1044,156 +1043,125 @@ class ProgramacaoGenetica:
             ultimos_angulos = []
             tempo_sem_coletar = 0
             ultimo_recurso_coletado = 0
-            posicoes_visitadas = set()  # Novo: conjunto de posições visitadas
-            ultimas_posicoes = []  # Novo: lista das últimas posições
-            
+            posicoes_visitadas = set()
+            ultimas_posicoes = []
+            colisoes_consecutivas = 0
+
             max_passos = 500
             passos = 0
-            
+
             while passos < max_passos:
                 sensores = robo.get_sensores(ambiente)
                 sensores['x'] = robo.x
                 sensores['y'] = robo.y
                 sensores['recursos_coletados'] = robo.recursos_coletados
                 sensores['total_recursos'] = len(ambiente.recursos)
-                
-                # Verificar tempo sem coletar recursos
+
                 if robo.recursos_coletados == ultimo_recurso_coletado:
                     tempo_sem_coletar += 1
                 else:
                     tempo_sem_coletar = 0
                     ultimo_recurso_coletado = robo.recursos_coletados
-                
-                # Penalidade por tempo sem coletar recursos
-                if tempo_sem_coletar > 100:  # 100 passos sem coletar
-                    fitness -= 5000  # Penalidade severa
+
+                if tempo_sem_coletar > 150:
+                    fitness -= 1000  # Penalidade moderada
                     break
-                
-                # Detectar movimento circular usando posições
+
                 posicao_atual = (round(robo.x, 1), round(robo.y, 1))
                 posicoes_visitadas.add(posicao_atual)
                 ultimas_posicoes.append(posicao_atual)
-                if len(ultimas_posicoes) > 20:  # Aumentado para 20 posições
+                if len(ultimas_posicoes) > 20:
                     ultimas_posicoes.pop(0)
-                
-                # Verificar se está girando em círculos usando posições
+
                 if len(ultimas_posicoes) >= 20:
-                    # Calcular a distância total percorrida
-                    distancia_total = 0
-                    for i in range(len(ultimas_posicoes)-1):
-                        dx = ultimas_posicoes[i+1][0] - ultimas_posicoes[i][0]
-                        dy = ultimas_posicoes[i+1][1] - ultimas_posicoes[i][1]
-                        distancia_total += np.sqrt(dx*dx + dy*dy)
-                    
-                    # Calcular a distância entre a primeira e última posição
-                    dx = ultimas_posicoes[-1][0] - ultimas_posicoes[0][0]
-                    dy = ultimas_posicoes[-1][1] - ultimas_posicoes[0][1]
-                    distancia_final = np.sqrt(dx*dx + dy*dy)
-                    
-                    # Se a distância total for muito maior que a distância final, está girando
-                    if distancia_total > 100 and distancia_final < 50:
-                        fitness -= 10000  # Penalidade muito severa
+                    distancia_total = sum(
+                        np.hypot(ultimas_posicoes[i+1][0] - ultimas_posicoes[i][0],
+                                ultimas_posicoes[i+1][1] - ultimas_posicoes[i][1])
+                        for i in range(len(ultimas_posicoes) - 1)
+                    )
+                    distancia_final = np.hypot(ultimas_posicoes[-1][0] - ultimas_posicoes[0][0],
+                                            ultimas_posicoes[-1][1] - ultimas_posicoes[0][1])
+                    if distancia_total > 80 and distancia_final < 20:
+                        fitness -= 2000  # Penalidade menor e mais justa
                         break
-                
-                # Detectar movimento circular usando ângulos
+
                 angulo_atual = sensores['angulo_atual']
                 angulos_visitados.add(round(angulo_atual, 2))
                 ultimos_angulos.append(angulo_atual)
                 if len(ultimos_angulos) > 10:
                     ultimos_angulos.pop(0)
-                
-                # Verificar se está girando em círculos usando ângulos
                 if len(ultimos_angulos) >= 10:
                     variacao_angulo = max(ultimos_angulos) - min(ultimos_angulos)
                     if variacao_angulo > 2 * np.pi:
-                        fitness -= 10000  # Penalidade muito severa
+                        fitness -= 2000  # Penalidade reduzida
                         break
-                
+
                 individuo.atualizar_estado(sensores)
-                
+
                 if individuo.estado == 'BUSCANDO_RECURSO':
                     recurso_mais_proximo, dist = individuo.encontrar_recurso_mais_proximo(sensores, ambiente)
                     if recurso_mais_proximo:
                         individuo.recurso_atual = recurso_mais_proximo
                         individuo.tempo_perseguindo = 0
-                
-                aceleracao = individuo.avaliar(sensores, 'aceleracao')
-                rotacao = individuo.avaliar(sensores, 'rotacao')
-                
-                aceleracao = max(-1, min(1, aceleracao))
-                rotacao = max(-0.5, min(0.5, rotacao))
-                
-                # Verificar progresso em direção ao recurso
+
+                aceleracao = max(-1, min(1, individuo.avaliar(sensores, 'aceleracao')))
+                rotacao = max(-0.5, min(0.5, individuo.avaliar(sensores, 'rotacao')))
+
                 if individuo.recurso_atual:
-                    distancia_atual = np.sqrt((robo.x - individuo.recurso_atual['x'])**2 + 
-                                           (robo.y - individuo.recurso_atual['y'])**2)
+                    distancia_atual = np.hypot(robo.x - individuo.recurso_atual['x'],
+                                            robo.y - individuo.recurso_atual['y'])
                     if distancia_atual >= ultima_distancia_recurso:
                         tempo_sem_progresso_recurso += 1
                     else:
                         tempo_sem_progresso_recurso = 0
                     ultima_distancia_recurso = distancia_atual
-                
-                distancia_movimento = np.sqrt((robo.x - ultima_posicao[0])**2 + (robo.y - ultima_posicao[1])**2)
+
+                distancia_movimento = np.hypot(robo.x - ultima_posicao[0],
+                                            robo.y - ultima_posicao[1])
                 if distancia_movimento < 0.1:
                     tempo_sem_movimento += 1
                 else:
                     tempo_sem_movimento = 0
                 ultima_posicao = (robo.x, robo.y)
-                
+
                 sem_energia = robo.mover(aceleracao, rotacao, ambiente)
-                
+
                 if robo.colisoes > 0 and ultima_colisao:
                     colisoes_consecutivas += 1
                 ultima_colisao = robo.colisoes > 0
-                
-                # Penalidade por ficar preso ou rodando em círculos
-                if tempo_sem_progresso_recurso > 20 or tempo_sem_movimento > 10:
-                    fitness -= 5000  # Penalidade severa
+
+                if tempo_sem_progresso_recurso > 30 or tempo_sem_movimento > 15:
+                    fitness -= 2000
                     break
-                
+
                 if sem_energia or ambiente.passo():
                     break
-                
+
                 passos += 1
-            
-            # Cálculo do fitness mais rigoroso
+
+            # Cálculo do fitness com pesos ajustados
             fitness_tentativa = 0
-            
-            # Bônus por recursos coletados (maior peso)
-            fitness_tentativa += robo.recursos_coletados * 3000  # Aumentado para 3000
-            
-            # Bônus por completar a missão (coletar todos e atingir meta)
+            fitness_tentativa += robo.recursos_coletados * 2000
             if robo.recursos_coletados == len(ambiente.recursos) and robo.meta_atingida:
-                fitness_tentativa += 10000  # Aumentado para 10000
-            
-            # Penalidades
-            fitness_tentativa -= robo.colisoes * 1000  # Aumentado para 1000
-            fitness_tentativa -= colisoes_consecutivas * 500  # Aumentado para 500
-            fitness_tentativa -= tempo_sem_movimento * 200  # Aumentado para 200
-            fitness_tentativa -= (100 - robo.energia) * 10  # Aumentado para 10
-            
-            # Penalidade por não coletar recursos
+                fitness_tentativa += 5000
+
+            fitness_tentativa -= robo.colisoes * 500
+            fitness_tentativa -= colisoes_consecutivas * 200
+            fitness_tentativa -= tempo_sem_movimento * 100
+            fitness_tentativa -= (100 - robo.energia) * 5
+
             if robo.recursos_coletados == 0:
-                fitness_tentativa -= 5000  # Aumentado para 5000
-            
-            # Penalidade por ficar preso ou rodando em círculos
-            if tempo_sem_progresso_recurso > 20 or tempo_sem_movimento > 10:
-                fitness_tentativa -= 5000  # Aumentado para 5000
-            
-            # Penalidade por movimento circular
-            if len(angulos_visitados) < 5:
-                fitness_tentativa -= 5000  # Aumentado para 5000
-            
-            # Penalidade por tempo sem coletar recursos
-            fitness_tentativa -= tempo_sem_coletar * 20  # Aumentado para 20
-            
-            # Penalidade por visitar poucas posições diferentes
+                fitness_tentativa -= 2000
+
+            fitness_tentativa -= tempo_sem_coletar * 5
+
             if len(posicoes_visitadas) < 10:
-                fitness_tentativa -= 5000  # Nova penalidade
-            
+                fitness_tentativa -= 2000
+
             fitness += max(0, fitness_tentativa)
-        
+
         return fitness / num_tentativas
+
     
     def avaliar_populacao(self):
         # Criar pool de processos
@@ -1284,7 +1252,7 @@ if __name__ == "__main__":
             print("Aviso: Número de processos ajustado para 1")
         
         print(f"Usando {pg.num_processos} processos para avaliação")
-        melhor_individuo, historico, historico_media = pg.evoluir(n_geracoes=40)
+        melhor_individuo, historico, historico_media = pg.evoluir(n_geracoes=10)
         
         if melhor_individuo is None:
             raise Exception("Nenhum indivíduo válido foi encontrado durante a evolução")

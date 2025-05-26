@@ -752,145 +752,59 @@ class IndividuoPG:
         sensores_normalizados["energia"] = sensores["energia"] / 100
         sensores_normalizados["velocidade"] = sensores["velocidade"] / 5
         
-        # Atualizar mapa de recursos se o ambiente estiver disponível
-        if self.ambiente is not None:
-            self.atualizar_mapa_recursos(sensores, self.ambiente)
+        # Atualizar estado com base nos recursos coletados
+        recursos_coletados = sensores.get('recursos_coletados', 0)
+        total_recursos = sensores.get('total_recursos', 5)
         
-        # Detecção de paredes e obstáculos
-        margem_parede = 50
-        proximo_parede = False
-        if (sensores['x'] < margem_parede or 
-            sensores['x'] > 800 - margem_parede or 
-            sensores['y'] < margem_parede or 
-            sensores['y'] > 600 - margem_parede):
-            proximo_parede = True
-            sensores_normalizados['proximo_parede'] = 1.0
+        if recursos_coletados == total_recursos:
+            self.estado = 'RETORNANDO_META'
+        elif self.estado == 'RETORNANDO_META' and not sensores['meta_atingida']:
+            self.estado = 'RETORNANDO_META'
         else:
-            sensores_normalizados['proximo_parede'] = 0.0
+            self.estado = 'BUSCANDO_RECURSO'
         
-        # Sempre calcular o recurso mais próximo
-        if self.estado == 'BUSCANDO_RECURSO' and self.ambiente is not None:
-            recurso_mais_proximo, dist = self.encontrar_recurso_mais_proximo(sensores, self.ambiente)
-            
-            if recurso_mais_proximo:
-                # Calcular ângulo ideal para o recurso
-                dx = recurso_mais_proximo['x'] - sensores['x']
-                dy = recurso_mais_proximo['y'] - sensores['y']
-                angulo_ideal = np.arctan2(dy, dx)
+        # Lógica de movimento baseada no estado
+        if self.estado == 'BUSCANDO_RECURSO':
+            # Ajustar velocidade com base na distância do recurso
+            if sensores['dist_recurso'] < 100:
+                self.velocidade_alvo = 0.3  # Velocidade reduzida quando próximo ao recurso
+            else:
+                self.velocidade_alvo = 0.7  # Velocidade normal
                 
-                # Normalizar diferença de ângulo
-                diff_angulo = angulo_ideal - sensores['angulo_atual']
-                while diff_angulo > np.pi:
-                    diff_angulo -= 2 * np.pi
-                while diff_angulo < -np.pi:
-                    diff_angulo += 2 * np.pi
+            # Reduzir velocidade perto de obstáculos
+            if sensores['dist_obstaculo'] < 100:
+                self.velocidade_alvo *= 0.5
                 
-                # Ajustar velocidade baseado na distância e alinhamento
-                if abs(diff_angulo) > np.pi/4:  # Se não estiver bem alinhado
-                    self.velocidade_alvo = 0.2  # Velocidade reduzida para girar
+            # Ajustar direção para o recurso mais próximo
+            if tipo == 'rotacao':
+                return sensores['angulo_recurso'] * 0.5  # Suavizar rotação
+            else:  # aceleracao
+                if abs(sensores['angulo_recurso']) > np.pi/4:
+                    return 0.2  # Reduzir velocidade ao girar
                 else:
-                    # Velocidade progressiva baseada na distância
-                    self.velocidade_alvo = 0.3 + (1 - dist/800) * 0.7
-                
-                # Reduzir velocidade próximo a obstáculos
-                if sensores['dist_obstaculo'] < 100 or proximo_parede:
-                    self.velocidade_alvo *= 0.3
-                
-                # Verificar progresso
-                if dist < self.ultima_distancia_recurso:
-                    self.tempo_sem_progresso = 0
-                else:
-                    self.tempo_sem_progresso += 1
-                
-                self.ultima_distancia_recurso = dist
-                
-                # Se ficar preso, tentar uma nova direção
-                if self.tempo_sem_progresso > 10:
-                    # Calcular novo ângulo evitando obstáculos
-                    angulo_escape = sensores['angulo_atual'] + np.pi/2
-                    if sensores['dist_obstaculo'] < 100:
-                        angulo_escape += np.pi/4
-                    sensores_normalizados['angulo_recurso'] = angulo_escape
-                    self.tempo_sem_progresso = 0
-                    self.velocidade_alvo = 0.3
-                
-                sensores_normalizados['velocidade_alvo'] = self.velocidade_alvo
-                sensores_normalizados['angulo_recurso'] = diff_angulo
-                sensores_normalizados['dist_recurso'] = dist/800  # Normalizar distância
-        
+                    return self.velocidade_alvo
+                    
         else:  # RETORNANDO_META
-            # Lógica similar para retornar à meta
-            dx = sensores['x_meta'] - sensores['x']
-            dy = sensores['y_meta'] - sensores['y']
-            angulo_ideal = np.arctan2(dy, dx)
-            
-            diff_angulo = angulo_ideal - sensores['angulo_atual']
-            while diff_angulo > np.pi:
-                diff_angulo -= 2 * np.pi
-            while diff_angulo < -np.pi:
-                diff_angulo += 2 * np.pi
-            
-            if abs(diff_angulo) > np.pi/4:
-                self.velocidade_alvo = 0.2
+            # Ajustar velocidade com base na distância da meta
+            if sensores['dist_meta'] < 100:
+                self.velocidade_alvo = 0.3  # Velocidade reduzida quando próximo à meta
             else:
-                self.velocidade_alvo = 0.3 + (1 - sensores_normalizados['dist_meta']) * 0.7
-            
-            if sensores['dist_obstaculo'] < 100 or proximo_parede:
-                self.velocidade_alvo *= 0.3
-            
-            sensores_normalizados['velocidade_alvo'] = self.velocidade_alvo
-            sensores_normalizados['angulo_meta'] = diff_angulo
-        
-        # Atualizar última posição
-        self.ultima_posicao = (sensores['x'], sensores['y'])
-        
-        arvore = self.arvore_aceleracao if tipo == 'aceleracao' else self.arvore_rotacao
-        return self.avaliar_no(arvore, sensores_normalizados)
-    
-    def avaliar_no(self, no, sensores):
-        if no is None:
-            return 0
-            
-        if no['tipo'] == 'folha':
-            if 'valor' in no:
-                return no['valor']
-            elif 'variavel' in no:
-                return sensores[no['variavel']]
-        
-        if no['operador'] == 'abs':
-            return abs(self.avaliar_no(no['esquerda'], sensores))
-        elif no['operador'] == 'cos':
-            return np.cos(self.avaliar_no(no['esquerda'], sensores))
-        elif no['operador'] == 'sin':
-            return np.sin(self.avaliar_no(no['esquerda'], sensores))
-        elif no['operador'] == 'if_positivo':
-            valor = self.avaliar_no(no['esquerda'], sensores)
-            if valor > 0:
-                return self.avaliar_no(no['direita'], sensores)
-            else:
-                return 0
-        elif no['operador'] == 'if_negativo':
-            valor = self.avaliar_no(no['esquerda'], sensores)
-            if valor < 0:
-                return self.avaliar_no(no['direita'], sensores)
-            else:
-                return 0
-        
-        esquerda = self.avaliar_no(no['esquerda'], sensores)
-        direita = self.avaliar_no(no['direita'], sensores) if no['direita'] is not None else 0
-        
-        if no['operador'] == '+':
-            return esquerda + direita
-        elif no['operador'] == '-':
-            return esquerda - direita
-        elif no['operador'] == '*':
-            return esquerda * direita
-        elif no['operador'] == '/':
-            return esquerda / direita if direita != 0 else 0
-        elif no['operador'] == 'max':
-            return max(esquerda, direita)
-        else:  # min
-            return min(esquerda, direita)
+                self.velocidade_alvo = 0.7  # Velocidade normal
+                
+            # Reduzir velocidade perto de obstáculos
+            if sensores['dist_obstaculo'] < 100:
+                self.velocidade_alvo *= 0.5
+                
+            # Ajustar direção para a meta
+            if tipo == 'rotacao':
+                return sensores['angulo_meta'] * 0.5  # Suavizar rotação
+            else:  # aceleracao
+                if abs(sensores['angulo_meta']) > np.pi/4:
+                    return 0.2  # Reduzir velocidade ao girar
+                else:
+                    return self.velocidade_alvo
+                    
+        return 0.0  # Valor padrão
     
     def mutacao_no(self, no, probabilidade):
         if random.random() < probabilidade:
@@ -1197,6 +1111,7 @@ class ProgramacaoGenetica:
 
                         # --- NOVO CÁLCULO DE FITNESS ---
             fitness_tentativa = 0
+<<<<<<< HEAD
             todos_recursos_coletados = (robo.recursos_coletados == len(ambiente.recursos))
             tarefa_completa = (individuo.estado == "TAREFA_COMPLETA")
 
@@ -1248,6 +1163,37 @@ class ProgramacaoGenetica:
             fitness_tentativa -= robo.distancia_percorrida * 0.5
 
             fitness += max(-100000, fitness_tentativa) # Adiciona um piso
+=======
+            
+            # Recompensas principais
+            fitness_tentativa += robo.recursos_coletados * 3000  # Aumentado o valor dos recursos
+            if robo.recursos_coletados == len(ambiente.recursos) and robo.meta_atingida:
+                fitness_tentativa += 10000  # Bônus maior por completar a tarefa
+            elif robo.recursos_coletados == len(ambiente.recursos):
+                fitness_tentativa += 5000  # Bônus por coletar todos recursos
+            
+            # Penalidades
+            fitness_tentativa -= robo.colisoes * 300
+            fitness_tentativa -= colisoes_consecutivas * 100
+            fitness_tentativa -= tempo_sem_movimento * 50
+            fitness_tentativa -= (100 - robo.energia) * 2
+            
+            # Penalidades por ineficiência
+            if robo.recursos_coletados == 0:
+                fitness_tentativa -= 3000
+            
+            fitness_tentativa -= tempo_sem_coletar * 10
+            
+            if len(posicoes_visitadas) < 10:
+                fitness_tentativa -= 1000
+            
+            # Bônus por eficiência
+            if robo.recursos_coletados > 0:
+                fitness_tentativa += (robo.recursos_coletados / len(ambiente.recursos)) * 2000
+                fitness_tentativa += (robo.distancia_percorrida / passos) * 500  # Recompensa por movimento eficiente
+            
+            fitness += max(0, fitness_tentativa)
+>>>>>>> c5ca757072bb38bd4411752f0fa5cb507877082a
 
         # Média das tentativas
         return fitness / num_tentativas if num_tentativas > 0 else 0
@@ -1333,7 +1279,11 @@ if __name__ == "__main__":
         
         # Criar e treinar o algoritmo genético
         print("Treinando o algoritmo genético...")
+<<<<<<< HEAD
         pg = ProgramacaoGenetica(tamanho_populacao=200, profundidade=5) # Profundidade aumentada para 5
+=======
+        pg = ProgramacaoGenetica(tamanho_populacao=150, profundidade=4)
+>>>>>>> c5ca757072bb38bd4411752f0fa5cb507877082a
         
         # Verificar se o número de processos está correto
         if pg.num_processos < 1:
@@ -1341,7 +1291,11 @@ if __name__ == "__main__":
             print("Aviso: Número de processos ajustado para 1")
         
         print(f"Usando {pg.num_processos} processos para avaliação")
+<<<<<<< HEAD
         melhor_individuo, historico, historico_media = pg.evoluir(n_geracoes=20) # Gerações ajustadas para 20
+=======
+        melhor_individuo, historico, historico_media = pg.evoluir(n_geracoes=25)  # Aumentado número de gerações
+>>>>>>> c5ca757072bb38bd4411752f0fa5cb507877082a
         
         if melhor_individuo is None:
             raise Exception("Nenhum indivíduo válido foi encontrado durante a evolução")
@@ -1371,7 +1325,7 @@ if __name__ == "__main__":
         
         # Simular o melhor indivíduo
         print("Simulando o melhor indivíduo...")
-        ambiente = Ambiente()
+        ambiente = Ambiente(num_obstaculos=4, num_recursos=4)  # Ambiente mais simples para teste
         robo = Robo(ambiente.largura // 2, ambiente.altura // 2)
         simulador = Simulador(ambiente, robo, melhor_individuo)
         

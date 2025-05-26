@@ -72,9 +72,3 @@ Contribuições são bem-vindas! Para contribuir:
 - [ ] Sistema de comunicação entre robôs
 - [ ] Interface gráfica mais elaborada
 - [ ] Sistema de aprendizado por reforço
-
-## 📧 Contato
-
-Seu Nome - [@seu_twitter](https://twitter.com/seu_twitter) - email@exemplo.com
-
-Link do Projeto: [https://github.com/seu-usuario/robo-programacao-genetica](https://github.com/seu-usuario/robo-programacao-genetica) 
